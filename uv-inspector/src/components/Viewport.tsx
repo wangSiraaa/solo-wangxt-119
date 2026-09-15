@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { AnalysisResult, MeshData, Selection } from '../model/types';
 import { ThreeView3D, type HeatMode } from '../three/ThreeView3D';
 import { UVView2D } from '../three/UVView2D';
+import { pick } from '../store/appStore';
 
 interface Props {
   mesh: MeshData | null;
@@ -9,11 +10,10 @@ interface Props {
   selection: Selection;
   heat: HeatMode;
   checker: boolean;
-  onPick: (faceIds: number[], additive: boolean) => void;
 }
 
-/** 左右两个视图：3D 模型 + 2D UV。选择通过 onPick 回流到 store 实现同步。 */
-export function Viewport({ mesh, analysis, selection, heat, checker, onPick }: Props): JSX.Element {
+/** 左右两个视图：3D 模型 + 2D UV。选择通过 store.pick 回流实现两视图同步。 */
+export function Viewport({ mesh, analysis, selection, heat, checker }: Props): JSX.Element {
   const ref3d = useRef<HTMLDivElement>(null);
   const ref2d = useRef<HTMLDivElement>(null);
   const view3d = useRef<ThreeView3D | null>(null);
@@ -22,8 +22,8 @@ export function Viewport({ mesh, analysis, selection, heat, checker, onPick }: P
   // 视图初始化（一次）
   useEffect(() => {
     if (!ref3d.current || !ref2d.current) return;
-    const a = new ThreeView3D(ref3d.current, { onPick });
-    const b = new UVView2D(ref2d.current, { onPick });
+    const a = new ThreeView3D(ref3d.current, { onPick: pick });
+    const b = new UVView2D(ref2d.current, { onPick: pick });
     view3d.current = a;
     view2d.current = b;
     return () => {
@@ -32,14 +32,9 @@ export function Viewport({ mesh, analysis, selection, heat, checker, onPick }: P
       view3d.current = null;
       view2d.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // onPick 引用保持最新（避免重建视图）
-  const pickRef = useRef(onPick);
-  pickRef.current = onPick;
-
-  // 网格/分析结果变化
+  // 网格/分析变化（含历史预览）：刷新数据
   useEffect(() => {
     if (mesh && analysis) {
       view3d.current?.setData(mesh, analysis);

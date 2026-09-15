@@ -353,3 +353,166 @@ details summary {
   background: linear-gradient(90deg, #2ecc71, #f1c40f, #e74c3c);
   margin: 4px 0 2px;
 }
+
+/* ---------------- 修订图谱 ---------------- */
+.history-panel {
+  position: fixed;
+  z-index: 55;
+  left: 8px;
+  right: 332px;
+  bottom: 8px;
+  top: 56px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.history-body {
+  display: grid;
+  grid-template-columns: 1fr 340px;
+  flex: 1;
+  min-height: 0;
+}
+
+.history-tree {
+  overflow-y: auto;
+  padding: 8px 6px;
+  border-right: 1px solid var(--line);
+}
+
+.hist-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  position: relative;
+}
+
+.hist-row::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-left: 1px dashed var(--line);
+}
+
+.hist-row.head {
+  background: rgba(93, 158, 247, 0.12);
+}
+
+.hist-row.preview {
+  outline: 1px solid var(--warn);
+}
+
+.hist-row.compare {
+  background: rgba(255, 200, 61, 0.1);
+}
+
+.hist-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #11151a;
+  flex-shrink: 0;
+}
+
+.hist-main {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  text-align: left;
+  cursor: pointer;
+  flex: 1;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hist-main:hover {
+  border-color: transparent;
+  color: var(--accent);
+}
+
+.hist-time,
+.hist-sum {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.hist-sum {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.hist-cmp,
+.hist-restore {
+  padding: 1px 7px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.hist-cmp.active {
+  background: var(--warn);
+  color: #1a1a1a;
+  border-color: var(--warn);
+}
+
+.hist-badge {
+  font-size: 10px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  padding: 0 5px;
+}
+
+.history-side {
+  overflow-y: auto;
+  padding: 12px;
+}
+
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.diff-table th,
+.diff-table td {
+  text-align: right;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-table th:first-child,
+.diff-table td:first-child {
+  text-align: left;
+}
+
+.preview-banner {
+  position: fixed;
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(255, 200, 61, 0.95);
+  color: #1a1a1a;
+  font-size: 11px;
+  padding: 3px 12px;
+  border-radius: 0 0 6px 6px;
+  z-index: 40;
+}

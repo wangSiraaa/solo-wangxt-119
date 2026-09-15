@@ -20,7 +20,8 @@ npm test           # 分析/身份保留相关的 Node 冒烟测试
 | --- | --- |
 | React + TS + Three.js 展示模型与 2D UV | `src/three/ThreeView3D.ts`、`src/three/UVView2D.ts`、`src/components/Viewport.tsx` |
 | xatlas WASM 可选自动展开 | `src/xatlas/`，WASM 与 emscripten 工厂随包 vendored，Vite 作为本地静态资源加载 |
-| IndexedDB 存工程，无后端 | `src/io/storage.ts`（保存/打开/删除，全部本地） |
+| IndexedDB 存工程，无后端 | `src/io/storage.ts`（整图原子写、v1 自动迁移、本地保存/打开/删除） |
+| 可审计 UV 修订图谱（版本树/分支/预览/对比/恢复） | `src/model/revisions.ts`、`src/components/HistoryPanel.tsx` |
 | 稳定顶点与面身份的 OBJ 子集 | `src/io/obj.ts`、`src/model/types.ts`（双索引空间，见下） |
 | 接缝两侧可有不同 UV，禁止按空间位置合并顶点 | 解析器与分析器全部基于稳定 id；刻意不做空间焊接（`test/identity.ts` 验证） |
 | 选中面两视图同步 | 选择以稳定面 id 存入 store，两视图订阅同一集合（`src/store/appStore.ts`） |
@@ -94,13 +95,39 @@ xatlas **不按坐标焊接**输入顶点——它依据索引共享关系建立
 - 热力模式：原色 / 面积畸变 / 角度畸变 / 翻转。
 - 镜像所选岛、修正翻转岛、xatlas 自动展开、导入/导出 OBJ、IndexedDB 保存/打开/删除。
 
+## 可审计的 UV 修订图谱
+
+每次改变 UV 的操作——**镜像所选岛、修正翻转岛、xatlas 成功展开、导入 OBJ、从历史恢复**——
+都会在版本树上追加一个**不可变**节点，记录父版本、操作类型与摘要、完整网格、分析摘要。
+
+- **原子一致**：节点创建是同步的，图/head/mesh/分析/选择/dirty 在同一次状态提交中切换；
+  之后才异步去抖保存（400ms）。异步保存失败只标记"保存失败"，内存图谱完整保留，下次整图重放。
+- **去重**：结果与父版本 UV 逐位等价（重复点"修正"、空选择镜像等）不产生节点。
+  "从祖先恢复"例外——即使 UV 与目标相同也建 `restore` 节点，以记录 head 跳转与分支点。
+- **分支**：从任意历史节点恢复会以该节点为父创建 restore 子节点，原分支与所有祖先保持不变、仍可达。
+- **半写入/冲突安全**：整棵图是 IndexedDB 中的**单个文档**，一次 readwrite 事务只做一次 put；
+  事务 abort（写冲突/配额/刷新中断）整体回滚，不会出现半个新节点或 head 错指。
+- **GC**：只允许删除从任何根都不可达的孤儿草稿节点；仍可达的版本拒绝删除。
+- **预览/比较**：点击历史行只预览（不移动 head，视图与导出对应预览版本）；选 A/B 两版本
+  比较翻转面、岛、接缝、重叠、退化、畸变差异及翻转面 id 的增减。
+- **刷新恢复**：最近工程 id 记在 localStorage，重开页面自动恢复最后一致状态。
+- **OBJ 导出严格对应当前选定版本**（预览时为预览版本，文件名含 `v<seq>`）。
+
+### IndexedDB schema 与迁移
+
+v2：`projects` 中每条记录为 `{ id, name, updatedAt, version:2, graph }`，`graph` 即整棵版本树。
+旧版（v1，仅存当前 mesh）在 `onupgradeneeded` 同一事务中读出并迁移为单根版本图谱；
+另有防御性迁移路径兜底。迁移根版本上的镜像岛/负轴翻转判定/xatlas 修正/OBJ 往返结果不变。
+
 ## 目录
 
 ```
 src/
   analysis/analyze.ts   全部检测（翻转/畸变/边/岛/重叠）
   io/obj.ts             OBJ 子集解析与标准导出
-  io/storage.ts         IndexedDB 工程存取
+  io/storage.ts         IndexedDB v2 整图原子写、v1 迁移、最近工程记忆
+  model/revisions.ts    不可变版本树：提交/去重/分支恢复/对比/GC
+  components/HistoryPanel.tsx 版本图谱、预览、A/B 对比、恢复
   model/                类型、几何工具、UV 修补/编辑、样例构造器
   samples/samples.ts    四个教学/回归样例
   three/                3D 与 2D 视图

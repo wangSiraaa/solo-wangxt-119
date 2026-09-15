@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/smoke.ts && tsx test/identity.ts && tsx test/largeguard.ts && tsx test/seamobj.ts && tsx test/flipAxes.ts && tsx test/fixNegative.ts && tsx test/mirrorRoundtrip.ts"
+    "test": "tsx test/smoke.ts && tsx test/identity.ts && tsx test/largeguard.ts && tsx test/seamobj.ts && tsx test/flipAxes.ts && tsx test/fixNegative.ts && tsx test/mirrorRoundtrip.ts && tsx test/revisions.ts && tsx test/storage.ts && tsx test/migration.ts && tsx test/storeFlow.ts"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -20,8 +20,9 @@
     "@types/react-dom": "^18.3.0",
     "@types/three": "^0.169.0",
     "@vitejs/plugin-react": "^4.3.4",
-    "typescript": "^5.6.3",
+    "fake-indexeddb": "^6.0.0",
     "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
     "vite": "^5.4.11"
   }
 }

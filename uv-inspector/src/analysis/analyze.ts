@@ -56,34 +56,56 @@ export function analyzeMesh(mesh: MeshData): AnalysisResult {
     const degenerate3d = area3d <= EPS;
     const degenerateUv = uvArea <= EPS;
 
-    // UV 翻转判定（轴无关的切空间雅可比判据）。
+    // UV 翻转判定。
     //
-    // 旧写法把"主轴投影有符号面积" proj 与"法线在该主轴的分量" nAxis 相乘。
-    // 但二者由同一对边向量导出：投影面积本身就是叉积分量（如主轴 z 时
-    // proj = nz），于是 proj * nAxis = nAxis²，符号恒为 +。对法线朝
-    // -X/-Y/-Z 的面，其正常 UV 绕序会被这个恒正基准误判成翻转。
+    // 绕序契约：**从面外侧观察**，几何面与 UV 绕序一致即为正常，相反即为镜像。
+    // 因此需要两个相互独立的符号：
+    //   1) 几何朝向——把 3D 三角形投影到垂直于其外向法线的"外侧屏幕"平面，
+    //      取有符号面积 screenSign。该符号本身携带外向朝向：法线指向主轴 + 时
+    //      为正，指向主轴 − 时为负（这就是"负面积正常绕序"的几何来源）。
+    //   2) UV 朝向——UV 三角形有符号面积 uvSign = sign(2·signedUvArea)。
+    // 两者同号 = 从面外侧看到的 UV 绕序与几何一致（正常）；异号 = 镜像翻转。
     //
-    // 正确基准来自切基雅可比。设按 UV 顶点顺序的两条边
-    //   p1 = P1-P0, p2 = P2-P0；q1 = uv1-uv0, q2 = uv2-uv0
-    // 切基 T（沿 +u）、B（沿 +v）满足
-    //   p1 = q1.x*T + q1.y*B,  p2 = q2.x*T + q2.y*B
-    // 几何法线 n = p1×p2，记 D = q1.x*q2.y - q1.y*q2.x = 2*signedUvArea。
-    // 解得 (T×B)·n = |n|² / D。|n|² > 0，故 (T×B)·n 与 D 同号：
-    //   D > 0  ⇔ +u×+v 与几何法线同向 ⇔ 纹理未镜像（flipped=false）
-    //   D < 0  ⇔ 镜像（flipped=true）
-    // 该判据只与 (T×B)·n 有关，与法线落在哪个主轴无关，因此对朝
-    // -X/-Y/-Z 的正常面同样给出 D>0、不误报。
+    // 不能用 detUv < 0 直接判翻转：那等价于要求所有面 UV 面积都为正，会把
+    // 朝 -X/-Y/-Z 的正常面（其外侧屏幕投影本身就是负的）误报。也不能把同一对
+    // 边向量导出的投影符号与法线分量相乘（那得到恒正的平方项）。
     //
-    // 约定：OBJ 子集不读取 vn，按低模通行约定假定几何面绕序朝外（CCW）。
-    // 在此约定下，朝外的面无论法线指向哪个主轴，正常 UV 的 D 恒为正。
+    // 屏幕平面的两轴取右手对，使 e_p × e_q = +e_axis：
+    //   主轴 X -> (y,z)，Y -> (z,x)，Z -> (x,y)。
     let flipped = false;
     if (!degenerate3d && !degenerateUv) {
+      const p01x = b3[0] - a3[0];
+      const p01y = b3[1] - a3[1];
+      const p01z = b3[2] - a3[2];
+      const p02x = c3[0] - a3[0];
+      const p02y = c3[1] - a3[1];
+      const p02z = c3[2] - a3[2];
+      const nx = p01y * p02z - p01z * p02y;
+      const ny = p01z * p02x - p01x * p02z;
+      const nz = p01x * p02y - p01y * p02x;
+
+      // 主导轴与对应屏幕轴 (p,q)
+      let ip: number;
+      let iq: number;
+      if (Math.abs(nx) >= Math.abs(ny) && Math.abs(nx) >= Math.abs(nz)) {
+        ip = 1; iq = 2; // 主轴 X：e_y × e_z = e_x
+      } else if (Math.abs(ny) >= Math.abs(nz)) {
+        ip = 2; iq = 0; // 主轴 Y：e_z × e_x = e_y
+      } else {
+        ip = 0; iq = 1; // 主轴 Z：e_x × e_y = e_z
+      }
+      // 投影到外侧屏幕平面的有符号面积（右手对）。
+      const screen =
+        (b3[ip] - a3[ip]) * (c3[iq] - a3[iq]) -
+        (c3[ip] - a3[ip]) * (b3[iq] - a3[iq]);
+
       const d1u = b2[0] - a2[0];
       const d1v = b2[1] - a2[1];
       const d2u = c2[0] - a2[0];
       const d2v = c2[1] - a2[1];
-      const detUv = d1u * d2v - d1v * d2u; // = 2*signedUvArea
-      flipped = detUv < 0;
+      const detUv = d1u * d2v - d1v * d2u; // 2*signedUvArea
+
+      flipped = Math.sign(screen) !== Math.sign(detUv);
     }
 
     // 角度畸变：3D 内角与 UV 内角逐一配对后的最大偏差

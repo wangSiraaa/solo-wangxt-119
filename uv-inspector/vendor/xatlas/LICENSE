@@ -1,0 +1,9 @@
+The files xatlas.js and xatlas.wasm are the official emscripten build of xatlas
+distributed by the npm package "xatlasjs" (https://github.com/repalash/xatlas.js),
+MIT License, Copyright (c) 2022 Palash Bansal.
+
+xatlas itself (https://github.com/jpcy/xatlas) is MIT licensed,
+Copyright (c) 2018 Jonathan Young, and derives from thekla_atlas (MIT).
+
+Only the following modification was made to xatlas.js: an ESM default export
+was appended so it can be imported by the Vite bundler.

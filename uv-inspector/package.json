@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/smoke.ts && tsx test/identity.ts && tsx test/largeguard.ts && tsx test/seamobj.ts"
+    "test": "tsx test/smoke.ts && tsx test/identity.ts && tsx test/largeguard.ts && tsx test/seamobj.ts && tsx test/flipAxes.ts"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -56,37 +56,35 @@ export function analyzeMesh(mesh: MeshData): AnalysisResult {
     const degenerate3d = area3d <= EPS;
     const degenerateUv = uvArea <= EPS;
 
-    // 期望 UV 绕序（与选择投影平面无关的不变量）：
-    // 把三角形按主轴平面投影，投影面积的符号 proj 与
-    // 法线在该主轴上的分量（n·axis）之积给出"从面外侧看"的 2D 绕序。
-    let expectedSign = 1;
-    if (!degenerate3d) {
-      const ex = b3[0] - a3[0];
-      const ey = b3[1] - a3[1];
-      const ez = b3[2] - a3[2];
-      const fx = c3[0] - a3[0];
-      const fy = c3[1] - a3[1];
-      const fz = c3[2] - a3[2];
-      const nx = ey * fz - ez * fy;
-      const ny = ez * fx - ex * fz;
-      const nz = ex * fy - ey * fx;
-      let axis: 0 | 1 | 2;
-      let ia: number;
-      let ib: number;
-      if (Math.abs(nx) >= Math.abs(ny) && Math.abs(nx) >= Math.abs(nz)) {
-        axis = 0; ia = 1; ib = 2;
-      } else if (Math.abs(ny) >= Math.abs(nz)) {
-        axis = 1; ia = 2; ib = 0;
-      } else {
-        axis = 2; ia = 0; ib = 1;
-      }
-      const proj =
-        (b3[ia] - a3[ia]) * (c3[ib] - a3[ib]) -
-        (c3[ia] - a3[ia]) * (b3[ib] - a3[ib]);
-      const nAxis = [nx, ny, nz][axis];
-      expectedSign = Math.sign(proj * nAxis) || 1;
+    // UV 翻转判定（轴无关的切空间雅可比判据）。
+    //
+    // 旧写法把"主轴投影有符号面积" proj 与"法线在该主轴的分量" nAxis 相乘。
+    // 但二者由同一对边向量导出：投影面积本身就是叉积分量（如主轴 z 时
+    // proj = nz），于是 proj * nAxis = nAxis²，符号恒为 +。对法线朝
+    // -X/-Y/-Z 的面，其正常 UV 绕序会被这个恒正基准误判成翻转。
+    //
+    // 正确基准来自切基雅可比。设按 UV 顶点顺序的两条边
+    //   p1 = P1-P0, p2 = P2-P0；q1 = uv1-uv0, q2 = uv2-uv0
+    // 切基 T（沿 +u）、B（沿 +v）满足
+    //   p1 = q1.x*T + q1.y*B,  p2 = q2.x*T + q2.y*B
+    // 几何法线 n = p1×p2，记 D = q1.x*q2.y - q1.y*q2.x = 2*signedUvArea。
+    // 解得 (T×B)·n = |n|² / D。|n|² > 0，故 (T×B)·n 与 D 同号：
+    //   D > 0  ⇔ +u×+v 与几何法线同向 ⇔ 纹理未镜像（flipped=false）
+    //   D < 0  ⇔ 镜像（flipped=true）
+    // 该判据只与 (T×B)·n 有关，与法线落在哪个主轴无关，因此对朝
+    // -X/-Y/-Z 的正常面同样给出 D>0、不误报。
+    //
+    // 约定：OBJ 子集不读取 vn，按低模通行约定假定几何面绕序朝外（CCW）。
+    // 在此约定下，朝外的面无论法线指向哪个主轴，正常 UV 的 D 恒为正。
+    let flipped = false;
+    if (!degenerate3d && !degenerateUv) {
+      const d1u = b2[0] - a2[0];
+      const d1v = b2[1] - a2[1];
+      const d2u = c2[0] - a2[0];
+      const d2v = c2[1] - a2[1];
+      const detUv = d1u * d2v - d1v * d2u; // = 2*signedUvArea
+      flipped = detUv < 0;
     }
-    const flipped = !degenerate3d && !degenerateUv && Math.sign(signedUvArea) !== expectedSign;
 
     // 角度畸变：3D 内角与 UV 内角逐一配对后的最大偏差
     let angleDistortion: number | null = null;
@@ -269,8 +267,9 @@ export function analyzeMesh(mesh: MeshData): AnalysisResult {
       isl.max[1] = Math.max(isl.max[1], q[1]);
     }
   });
-  // 岛的镜像判定：多数面未通过朝向检查（expectedSign 已考虑面法线方向，
-  // 因此朝 -X/-Y/-Z 的面即便 UV 有符号面积为负也不算镜像）。
+  // 岛的镜像判定：多数非退化面被雅可比判据标为 flipped。
+  // 该判据轴无关——朝 -X/-Y/-Z 的正常面（detUv>0）不计入，只有真正镜像
+  // （detUv<0）的面才会让岛被标记为 mirrored。
   const islands = [...islandByRoot.values()];
   for (const isl of islands) {
     let bad = 0;

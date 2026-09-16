@@ -13,9 +13,12 @@ export function islandUvVertices(mesh: MeshData, seedFaces: Iterable<number>): S
 
   const visited = new Set<number>(seeds);
   let changed = true;
+  // 按 face id 升序遍历，保证结果与种子的传入顺序无关（镜像中线等派生量确定可复现）。
+  const faceOrder = mesh.faces.map((_, i) => i);
   while (changed) {
     changed = false;
-    for (const tri of mesh.faces) {
+    for (const fi of faceOrder) {
+      const tri = mesh.faces[fi];
       const uvs = [tri.uv[0], tri.uv[1], tri.uv[2]];
       if (uvs.some((u) => visited.has(u))) {
         for (const u of uvs) {
@@ -44,10 +47,15 @@ export function mirrorIslandsU(mesh: MeshData, seedFaces: Iterable<number>): Mes
     minU = Math.min(minU, mesh.uvs[u * 2]);
     maxU = Math.max(maxU, mesh.uvs[u * 2]);
   }
-  const mid = (minU + maxU) / 2;
   const uvs = Float64Array.from(mesh.uvs);
   for (const u of verts) {
-    uvs[u * 2] = 2 * mid - uvs[u * 2];
+    // 用 minU+maxU-x 直接镜像（与 2*mid-x 等价但少一次除法取整），
+    // 并把接近边界端点的值吸附回精确的 min/max，保证同一操作可重复、可比较。
+    const x = uvs[u * 2];
+    let y = minU + maxU - x;
+    if (Math.abs(y - minU) < 1e-9) y = minU;
+    if (Math.abs(y - maxU) < 1e-9) y = maxU;
+    uvs[u * 2] = y;
   }
   return { ...mesh, uvs };
 }

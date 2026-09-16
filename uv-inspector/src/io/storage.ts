@@ -140,6 +140,91 @@ export async function saveProjectGraph(
   await tx('readwrite', (s) => s.put(record));
 }
 
+export class ConcurrentWriteError extends Error {
+  constructor(
+    public remote: ProjectRecordV2,
+    public local: ProjectRecordV2,
+  ) {
+    super('IndexedDB 中的工程已被其它标签页更新（etag 冲突）');
+    this.name = 'ConcurrentWriteError';
+  }
+}
+
+/**
+ * 乐观并发写入：仅当远端 etag === expectedEtag 时覆盖。
+ * 若远端已被另一标签页推进，抛 ConcurrentWriteError 并回传远端文档，
+ * 由调用方做不可变节点合并后重试——绝不静默覆盖对方的可达分支。
+ */
+export async function saveProjectGraphIfEtag(
+  id: string,
+  name: string,
+  graph: RevisionGraph,
+  expectedEtag: number,
+  updatedAt = Date.now(),
+): Promise<ProjectRecordV2> {
+  const db = await openDb();
+  return new Promise<ProjectRecordV2>((resolve, reject) => {
+    const t = db.transaction(STORE, 'readwrite');
+    const store = t.objectStore(STORE);
+    const getReq = store.get(id);
+    getReq.onsuccess = () => {
+      const remote = getReq.result as ProjectRecordV2 | undefined;
+      const remoteEtag = remote?.graph?.etag ?? 0;
+      if (remote && remoteEtag !== expectedEtag) {
+        t.abort();
+        reject(new ConcurrentWriteError(remote, { id, name, updatedAt, version: 2, graph }));
+        return;
+      }
+      const record: ProjectRecordV2 = { id, name, updatedAt, version: 2, graph };
+      const putReq = store.put(record);
+      putReq.onsuccess = () => resolve(record);
+      putReq.onerror = () => reject(putReq.error);
+    };
+    getReq.onerror = () => reject(getReq.error);
+    t.onerror = () => reject(t.error);
+    t.onabort = () => {
+      // abort 由上面显式触发时 onerror 已先 reject；这里兜底
+      if (!(t.error && (t.error as Error & { code?: number }).code === 20)) {
+        // noop，避免 unhandled
+      }
+    };
+  });
+}
+
+/** 合并两个不可变图（本地优先）：远端新增的版本/分支并入，取较大 etag。 */
+export function mergeGraphs(local: RevisionGraph, remote: RevisionGraph): RevisionGraph {
+  const revisions = { ...remote.revisions, ...local.revisions };
+  // 分支逐 id 合并：同一分支取 head 版本 seq 更大的指针，避免本地过期指针回退远端推进
+  const branches: RevisionGraph['branches'] = { ...(remote.branches ?? {}) };
+  for (const [id, lb] of Object.entries(local.branches ?? {})) {
+    const rb = branches[id];
+    if (!rb) {
+      branches[id] = lb;
+      continue;
+    }
+    const lSeq = revisions[lb.headId]?.seq ?? -1;
+    const rSeq = revisions[rb.headId]?.seq ?? -1;
+    branches[id] = lSeq >= rSeq ? lb : rb;
+  }
+  // 草稿：取更新的一条
+  const pendingMerge =
+    local.pendingMerge && remote.pendingMerge
+      ? local.pendingMerge.updatedAt >= remote.pendingMerge.updatedAt
+        ? local.pendingMerge
+        : remote.pendingMerge
+      : local.pendingMerge ?? remote.pendingMerge ?? null;
+  return {
+    revisions,
+    branches,
+    headId: local.headId,
+    currentBranchId: local.currentBranchId,
+    mainBranchId: local.mainBranchId || remote.mainBranchId || 'main',
+    nextSeq: Math.max(local.nextSeq, remote.nextSeq),
+    pendingMerge,
+    etag: Math.max(local.etag ?? 0, remote.etag ?? 0) + 1,
+  };
+}
+
 export async function listProjects(): Promise<ProjectMeta[]> {
   const all = await tx<ProjectRecordV2[]>('readonly', (s) => s.getAll());
   return all

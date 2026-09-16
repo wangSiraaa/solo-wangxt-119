@@ -516,3 +516,97 @@ details summary {
   border-radius: 0 0 6px 6px;
   z-index: 40;
 }
+
+/* ---------------- 提案 / 三方合并 ---------------- */
+.merge-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.merge-dialog {
+  width: min(900px, 92vw);
+  max-height: 86vh;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.merge-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.merge-body {
+  padding: 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.merge-conflicts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.conflict-row {
+  border: 1px solid var(--bad);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.conflict-row.resolved {
+  border-color: #5fd08a;
+}
+
+.conflict-coords {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.conflict-actions input {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 4px 8px;
+}
+
+.merge-side {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.hist-branch-group {
+  margin-bottom: 10px;
+}
+.hist-branch-label {
+  font-size: 11px;
+  color: var(--accent);
+  padding: 4px 8px;
+  letter-spacing: 0.04em;
+}

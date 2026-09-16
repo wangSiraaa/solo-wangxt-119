@@ -22,11 +22,13 @@ import {
 import { unwrapMesh } from '../xatlas/unwrap';
 import type { HeatMode } from '../three/ThreeView3D';
 import { HistoryPanel } from './HistoryPanel';
+import { MergeDialog } from './MergeDialog';
 
 export function Toolbar(): JSX.Element {
   const state = useAppState();
   const fileRef = useRef<HTMLInputElement>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
 
   const onImportOBJ = async (file: File) => {
     const text = await file.text();
@@ -256,6 +258,9 @@ export function Toolbar(): JSX.Element {
           <button onClick={() => void onGc()} title="删除不可达的草稿/半写入节点">
             清理草稿
           </button>
+          <button className={showMerge ? 'active' : ''} disabled={!state.graph} onClick={() => setShowMerge((v) => !v)}>
+            提案 / 合并{state.graph?.pendingMerge ? ' ●' : ''}
+          </button>
         </div>
 
         <div className="group" style={{ borderRight: 'none' }}>
@@ -277,6 +282,7 @@ export function Toolbar(): JSX.Element {
         </div>
       </div>
       {showHistory && <HistoryPanel onClose={() => setShowHistory(false)} />}
+      {showMerge && <MergeDialog onClose={() => setShowMerge(false)} />}
     </>
   );
 }

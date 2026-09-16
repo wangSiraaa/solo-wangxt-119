@@ -1,4 +1,5 @@
 import {
+  MAIN_BRANCH,
   ancestorChain,
   commitRevision,
   createGraph,
@@ -92,17 +93,19 @@ const commit = (
   check(restored.created, '从祖先 v1 恢复产生新节点（即使 UV 与 v1 相同）');
   g = restored.graph;
 
-  // 两条分支都保留：v2 仍可达（从根），新 restore 节点也在
+  // 两条分支都保留：v2 留在 main 头，restore 落在自动创建的命名分支
   const allIds = Object.keys(g.revisions);
   check(allIds.length === 4, `共 4 个节点（root,v1,v2,restore），实际 ${allIds.length}`);
   check(g.revisions[g.headId].parentId === v1Id, '恢复节点的父是 v1（新分支挂在 v1 下）');
-  check(g.revisions[r2.revision.id] !== undefined, '原分支的 v2 仍存在、未被覆盖');
+  check(g.revisions[r2.revision.id] !== undefined, '原 main 的 v2 仍存在、未被覆盖');
 
-  // head 的祖先链是 root->v1->restore，不含 v2
+  // head 祖先链：restore 分支为 root->v1->restore
   const chain = ancestorChain(g, g.headId).map((r) => r.id);
-  check(chain.length === 3 && chain[1] === v1Id && !chain.includes(r2.revision.id), 'head 祖先链为 root-v1-restore（与 v2 分支分离）');
+  check(chain.length === 3 && chain[1] === v1Id && !chain.includes(r2.revision.id), '恢复分支祖先链 root-v1-restore（与 v2 分离）');
 
-  // v2 仍从根可达（在另一分支上）
+  // main 分支头仍是 v2，恢复在新分支 -> 所有节点从某分支头可达
+  check(g.branches[MAIN_BRANCH].headId === r2.revision.id, 'main 分支头保持 v2');
+  check(g.currentBranchId !== MAIN_BRANCH, '恢复后 checkout 到新分支');
   check(unreachableNodes(g).length === 0, '正常分支树没有不可达节点');
 }
 

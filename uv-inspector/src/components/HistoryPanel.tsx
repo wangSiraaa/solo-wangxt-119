@@ -15,6 +15,8 @@ const KIND_LABEL: Record<Revision['kind'], string> = {
   fixflip: '修正翻转',
   xatlas: 'xatlas',
   restore: '恢复',
+  proposal: '提案',
+  merge: '合并',
   initial: '初始',
 };
 
@@ -24,30 +26,36 @@ const KIND_COLOR: Record<Revision['kind'], string> = {
   fixflip: '#5fd08a',
   xatlas: '#5d9ef7',
   restore: '#d08bff',
+  proposal: '#4fd1c5',
+  merge: '#ff9f43',
   initial: '#8a94a0',
 };
 
-/** 从根做 DFS，得到带深度与分支信息的节点序列。 */
-function layout(graph: NonNullable<ReturnType<typeof getHistory>>['graph']) {
-  const children = new Map<string | null, Revision[]>();
-  for (const rev of Object.values(graph.revisions)) {
-    const key = rev.parentId;
-    const arr = children.get(key) ?? [];
-    arr.push(rev);
-    children.set(key, arr);
-  }
-  for (const arr of children.values()) arr.sort((a, b) => a.seq - b.seq);
-  const rows: Array<{ rev: Revision; depth: number; branch: number; isLeaf: boolean }> = [];
-  const walk = (id: string | null, depth: number, branch: number) => {
-    const arr = children.get(id) ?? [];
-    arr.forEach((rev, i) => {
-      const kidCount = (children.get(rev.id) ?? []).length;
-      rows.push({ rev, depth, branch: branch * 10 + i, isLeaf: kidCount === 0 });
-      walk(rev.id, depth + 1, branch * 10 + i);
+/** 按分支分组：每个分支沿第一父回溯到 fork 点，得到该分支的版本序列。 */
+function layoutByBranch(graph: NonNullable<ReturnType<typeof getHistory>>['graph']) {
+  const groups: Array<{ branchName: string; branchId: string; revs: Revision[]; merged?: boolean }> = [];
+  for (const branch of Object.values(graph.branches).sort((a, b) => a.createdAt - b.createdAt)) {
+    const chain: Revision[] = [];
+    let cur: Revision | undefined = graph.revisions[branch.headId];
+    const guard = new Set<string>();
+    while (cur && !guard.has(cur.id)) {
+      guard.add(cur.id);
+      chain.push(cur);
+      // 沿第一父回溯，直到本分支的 fork 点（父属于别的分支或为 null）
+      const parentId: string | null | undefined = cur.parentId;
+      const parent: Revision | undefined = parentId ? graph.revisions[parentId] : undefined;
+      if (!parent) break;
+      if (parent.branchId && parent.branchId !== branch.id) break;
+      cur = parent;
+    }
+    groups.push({
+      branchName: branch.name,
+      branchId: branch.id,
+      revs: chain.reverse(),
+      merged: branch.merged,
     });
-  };
-  walk(null, 0, 0);
-  return rows;
+  }
+  return groups;
 }
 
 function fmtDelta(n: number): string {
@@ -67,7 +75,8 @@ export function HistoryPanel({ onClose }: { onClose: () => void }): JSX.Element 
   );
 
   if (!hist) return null;
-  const rows = layout(hist.graph);
+  const groups = layoutByBranch(hist.graph);
+  const totalRevs = groups.reduce((n, g) => n + g.revs.length, 0);
 
   const toggleCompare = (id: string) => {
     if (compareA === id) {
@@ -92,7 +101,7 @@ export function HistoryPanel({ onClose }: { onClose: () => void }): JSX.Element 
       <div className="history-head">
         <strong>UV 修订图谱</strong>
         <span className="muted">
-          {rows.length} 个版本 · 从任意节点恢复会形成分支，不覆盖原历史
+          {totalRevs} 个版本 · {groups.length} 分支 · 从任意节点恢复会形成分支，不覆盖原历史
         </span>
         <span style={{ flex: 1 }} />
         <button
@@ -108,53 +117,60 @@ export function HistoryPanel({ onClose }: { onClose: () => void }): JSX.Element 
 
       <div className="history-body">
         <div className="history-tree">
-          {rows.map(({ rev, depth }) => {
-            const isHead = rev.id === hist.headId;
-            const isPreview = rev.id === state.previewId;
-            const inCompare = rev.id === compareA || rev.id === compareB;
-            return (
-              <div
-                key={rev.id}
-                className={
-                  'hist-row' +
-                  (isHead ? ' head' : '') +
-                  (isPreview ? ' preview' : '') +
-                  (inCompare ? ' compare' : '')
-                }
-                style={{ paddingLeft: 10 + depth * 22 }}
-              >
-                <span className="hist-tag" style={{ background: KIND_COLOR[rev.kind] }}>
-                  {KIND_LABEL[rev.kind]}
-                </span>
-                <button className="hist-main" title={rev.label} onClick={() => previewRevision(isPreview ? null : rev.id)}>
-                  <b>v{rev.seq}</b> {rev.label}
-                </button>
-                <span className="muted hist-time">{new Date(rev.createdAt).toLocaleTimeString()}</span>
-                <span className="hist-sum">
-                  翻转 {rev.summary.flipped} · 岛 {rev.summary.islandCount} · 缝 {rev.summary.seamEdgeCount}
-                </span>
-                <button
-                  className={'hist-cmp' + (inCompare ? ' active' : '')}
-                  onClick={() => toggleCompare(rev.id)}
-                  title="选择用于比较的版本"
-                >
-                  {rev.id === compareA ? 'A' : rev.id === compareB ? 'B' : '比'}
-                </button>
-                {!isHead && (
-                  <button
-                    className="hist-restore"
-                    onClick={() => {
-                      restoreToRevision(rev.id);
-                    }}
-                    title="以此版本为父创建恢复节点（形成分支）"
-                  >
-                    恢复
-                  </button>
-                )}
-                {isHead && <span className="hist-badge">当前</span>}
+          {groups.map((g) => (
+            <div key={g.branchId} className="hist-branch-group">
+              <div className="hist-branch-label">
+                ⎇ {g.branchName}
+                {g.branchId === hist.graph.mainBranchId ? '（主）' : ''}
+                {g.merged ? ' · 已合并' : ''}
               </div>
-            );
-          })}
+              {g.revs.map((rev, depth) => {
+                const isHead = rev.id === hist.headId;
+                const isPreview = rev.id === state.previewId;
+                const inCompare = rev.id === compareA || rev.id === compareB;
+                return (
+                  <div
+                    key={rev.id}
+                    className={
+                      'hist-row' +
+                      (isHead ? ' head' : '') +
+                      (isPreview ? ' preview' : '') +
+                      (inCompare ? ' compare' : '')
+                    }
+                    style={{ paddingLeft: 10 + depth * 22 }}
+                  >
+                    <span className="hist-tag" style={{ background: KIND_COLOR[rev.kind] }}>
+                      {KIND_LABEL[rev.kind]}
+                    </span>
+                    <button className="hist-main" title={rev.label} onClick={() => previewRevision(isPreview ? null : rev.id)}>
+                      <b>v{rev.seq}</b> {rev.label}
+                    </button>
+                    <span className="muted hist-time">{new Date(rev.createdAt).toLocaleTimeString()}</span>
+                    <span className="hist-sum">
+                      翻转 {rev.summary.flipped} · 岛 {rev.summary.islandCount} · 缝 {rev.summary.seamEdgeCount}
+                    </span>
+                    <button
+                      className={'hist-cmp' + (inCompare ? ' active' : '')}
+                      onClick={() => toggleCompare(rev.id)}
+                      title="选择用于比较的版本"
+                    >
+                      {rev.id === compareA ? 'A' : rev.id === compareB ? 'B' : '比'}
+                    </button>
+                    {!isHead && (
+                      <button
+                        className="hist-restore"
+                        onClick={() => restoreToRevision(rev.id)}
+                        title="以此版本为父创建恢复节点（形成分支）"
+                      >
+                        恢复
+                      </button>
+                    )}
+                    {isHead && <span className="hist-badge">当前</span>}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
 
         <div className="history-side">

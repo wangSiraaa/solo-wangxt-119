@@ -1,14 +1,23 @@
 import type { AnalysisResult, MeshData } from './types';
 
 /**
- * 可审计的 UV 修订图谱（版本树）。
+ * 可审计的 UV 修订图谱：版本树 + 命名分支 + 三方合并。
  *
- * 每个 Revision 是一个**不可变**版本节点：记录父版本、产生它的操作摘要、
- * 该版本的完整网格以及分析摘要。从任意历史节点恢复会创建一个以该节点为父的
- * 新节点（形成分支），绝不覆盖原分支。
+ * 每个 Revision 不可变，记录父版本、操作、网格与分析摘要。普通提交只有一个父；
+ * 合并提交有两个父（目标头 + 提案头）并附 MergeCommitInfo。
  */
 
-export type RevisionKind = 'import' | 'mirror' | 'fixflip' | 'xatlas' | 'restore' | 'initial';
+export type RevisionKind =
+  | 'import'
+  | 'mirror'
+  | 'fixflip'
+  | 'xatlas'
+  | 'restore'
+  | 'proposal'
+  | 'merge'
+  | 'initial';
+
+export type ResolutionKind = 'proposal' | 'target' | 'manual';
 
 export interface RevisionSummary {
   faceCount: number;
@@ -26,34 +35,95 @@ export interface RevisionSummary {
   maxAreaRatioLog: number;
 }
 
+export interface MergeCommitInfo {
+  baseId: string;
+  proposalId: string;
+  targetId: string;
+  proposalBranchId: string;
+  targetBranchId: string;
+  /** 冲突 id -> 决议类型 */
+  resolutions: Record<string, ResolutionKind>;
+  autoFaceCount: number;
+  conflictCount: number;
+}
+
 export interface Revision {
   id: string;
   parentId: string | null;
   kind: RevisionKind;
-  /** 人类可读的操作摘要，如 "镜像所选 UV 岛" */
   label: string;
-  /** 创建时间（毫秒） */
   createdAt: number;
-  /** 递增版本号（仅用于显示，不代表线性先后） */
   seq: number;
-  /** 该版本的完整网格（不可变快照） */
   mesh: MeshData;
-  /** 该版本的分析摘要（分析结果本身可由 mesh 重算，这里存摘要用于对比） */
   summary: RevisionSummary;
+  /** 所属分支 id（旧图节点缺失时由 ensureBranches 归入 main） */
+  branchId?: string;
+  /** 合并提交的第二父（提案侧） */
+  secondParentId?: string | null;
+  mergeInfo?: MergeCommitInfo;
+}
+
+export interface Branch {
+  id: string;
+  name: string;
+  headId: string;
+  /** 提案分支的切出点（共同祖先候选）；main 为 null */
+  forkPointId: string | null;
+  createdAt: number;
+  sourceBranchId?: string;
+  merged?: boolean;
+}
+
+export interface ConflictSnap {
+  uvIds: [number, number, number];
+  coords: Array<[number, number]>;
+}
+
+export interface MergeConflict {
+  id: string;
+  faceIds: number[];
+  reason: 'same-face-changed' | 'shared-uv-vertex';
+  base: ConflictSnap;
+  proposal: ConflictSnap;
+  target: ConflictSnap;
+  /** 当前决议；null = 未决 */
+  resolution: ResolutionKind | null;
+  /** manual 决议的角点 UV 坐标（3 个） */
+  manual?: Array<[number, number]> | null;
+}
+
+export interface MergeDraft {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  baseId: string;
+  proposalId: string;
+  targetId: string;
+  proposalBranchId: string;
+  targetBranchId: string;
+  /** 自动合并成功的面 id（三方互不冲突） */
+  autoFaces: number[];
+  /** 待决议冲突 */
+  conflicts: MergeConflict[];
+  /** 用于提交的标签 */
+  label: string;
 }
 
 export interface RevisionGraph {
-  /** id -> 节点 */
   revisions: Record<string, Revision>;
-  /** 当前选定版本 id */
+  /** 主工作分支当前 head（= branches[currentBranchId].headId） */
   headId: string;
-  /** 已分配的最大 seq */
   nextSeq: number;
+  branches: Record<string, Branch>;
+  currentBranchId: string;
+  mainBranchId: string;
+  pendingMerge: MergeDraft | null;
+  /** 乐观并发标签，每次写入递增 */
+  etag: number;
 }
 
-export type DiffStatus = 'added' | 'removed' | 'same' | 'changed';
+export const MAIN_BRANCH = 'main';
 
-/** 两个版本之间的翻转/岛/接缝差异。 */
 export interface RevisionDiff {
   flipped: { before: number; after: number; delta: number };
   islands: { before: number; after: number; delta: number };
@@ -62,7 +132,6 @@ export interface RevisionDiff {
   degenerateUv: { before: number; after: number; delta: number };
   maxAngle: { before: number; after: number; delta: number };
   maxAreaLog: { before: number; after: number; delta: number };
-  /** 翻转面 id 的集合变化 */
   flippedFaceIds: { added: number[]; removed: number[] };
 }
 
@@ -85,37 +154,102 @@ export function makeSummary(mesh: MeshData, analysis: AnalysisResult): RevisionS
   };
 }
 
+function defaultRootFields(root: Revision) {
+  return {
+    revisions: { [root.id]: root },
+    headId: root.id,
+    nextSeq: root.seq + 1,
+    branches: {
+      [MAIN_BRANCH]: {
+        id: MAIN_BRANCH,
+        name: 'main',
+        headId: root.id,
+        forkPointId: null,
+        createdAt: root.createdAt,
+      },
+    } as Record<string, Branch>,
+    currentBranchId: MAIN_BRANCH,
+    mainBranchId: MAIN_BRANCH,
+    pendingMerge: null,
+    etag: 1,
+  };
+}
+
+/** 新图（导入根版本）。 */
 export function createGraph(root: Revision): RevisionGraph {
-  return { revisions: { [root.id]: root }, headId: root.id, nextSeq: root.seq + 1 };
+  const rooted: Revision = { ...root, branchId: root.branchId ?? MAIN_BRANCH, secondParentId: null };
+  return defaultRootFields(rooted) as RevisionGraph;
+}
+
+/** 兼容旧图（无 branches）：惰性迁移为单 main 分支，所有节点归 main。 */
+export function ensureBranches(graph: RevisionGraph): RevisionGraph {
+  if (graph.branches && graph.currentBranchId) return graph;
+  const root = Object.values(graph.revisions).find((r) => r.parentId === null) ??
+    Object.values(graph.revisions)[0];
+  const revisions: Record<string, Revision> = {};
+  for (const r of Object.values(graph.revisions)) {
+    revisions[r.id] = r.branchId ? r : { ...r, branchId: MAIN_BRANCH };
+  }
+  return {
+    ...graph,
+    revisions,
+    branches: {
+      [MAIN_BRANCH]: {
+        id: MAIN_BRANCH,
+        name: 'main',
+        headId: graph.headId,
+        forkPointId: root ? root.id : null,
+        createdAt: root?.createdAt ?? Date.now(),
+      },
+    },
+    currentBranchId: MAIN_BRANCH,
+    mainBranchId: MAIN_BRANCH,
+    pendingMerge: graph.pendingMerge ?? null,
+    etag: graph.etag ?? 1,
+  };
+}
+
+export function uvEquals(a: MeshData, b: MeshData): boolean {
+  if (a.uvs.length !== b.uvs.length || a.faces.length !== b.faces.length) return false;
+  for (let i = 0; i < a.uvs.length; i++) if (a.uvs[i] !== b.uvs[i]) return false;
+  for (let f = 0; f < a.faces.length; f++) {
+    const fa = a.faces[f];
+    const fb = b.faces[f];
+    if (
+      fa.uv[0] !== fb.uv[0] || fa.uv[1] !== fb.uv[1] || fa.uv[2] !== fb.uv[2] ||
+      fa.v[0] !== fb.v[0] || fa.v[1] !== fb.v[1] || fa.v[2] !== fb.v[2]
+    ) return false;
+  }
+  return true;
 }
 
 /**
- * 提交一个新版本。
- *
- * @param opts.dedupe 当为 true 且新网格与父版本 UV 完全等价（无实际 UV 变化）时，
- *   不创建节点，返回父节点。镜像/修正在"没有任何翻转/没有选中岛"等空操作时使用。
- * @returns 新图谱与被提交（或复用）的版本；若被去重则 created=false。
+ * 在指定分支头上提交新版本。
+ * - dedupe：与父 UV 等价时不建节点。
+ * - 分支指针与 head 原子更新（同一不可变图对象）。
  */
 export function commitRevision(
-  graph: RevisionGraph,
+  graphIn: RevisionGraph,
   opts: {
     parentId: string;
     kind: RevisionKind;
     label: string;
     mesh: MeshData;
     summary: RevisionSummary;
+    branchId?: string;
     now?: number;
     idFactory?: () => string;
   },
 ): { graph: RevisionGraph; revision: Revision; created: boolean } {
+  const graph = ensureBranches(graphIn);
   const parent = graph.revisions[opts.parentId];
   if (!parent) throw new Error(`commitRevision: 父版本 ${opts.parentId} 不存在`);
 
-  // 去重：UV 数组逐元素相同且面引用不变 => 没有实际 UV 变化
   if (uvEquals(parent.mesh, opts.mesh)) {
     return { graph, revision: parent, created: false };
   }
 
+  const branchId = opts.branchId ?? (parent.branchId || MAIN_BRANCH);
   const rev: Revision = {
     id: opts.idFactory ? opts.idFactory() : crypto.randomUUID(),
     parentId: opts.parentId,
@@ -125,44 +259,30 @@ export function commitRevision(
     seq: graph.nextSeq,
     mesh: opts.mesh,
     summary: opts.summary,
+    branchId,
+    secondParentId: null,
   };
+  const branches = { ...graph.branches };
+  if (branches[branchId]) {
+    branches[branchId] = { ...branches[branchId], headId: rev.id };
+  }
+  const onCurrent = graph.currentBranchId === branchId;
   const next: RevisionGraph = {
+    ...graph,
     revisions: { ...graph.revisions, [rev.id]: rev },
-    headId: rev.id,
+    headId: onCurrent ? rev.id : graph.headId,
     nextSeq: graph.nextSeq + 1,
+    branches,
+    etag: graph.etag + 1,
   };
   return { graph: next, revision: rev, created: true };
 }
 
-/** 两个网格的 UV 状态是否逐位等价（位置/面相同前提下比较 UV 与面的 uv 引用）。 */
-export function uvEquals(a: MeshData, b: MeshData): boolean {
-  if (a.uvs.length !== b.uvs.length || a.faces.length !== b.faces.length) return false;
-  for (let i = 0; i < a.uvs.length; i++) {
-    if (a.uvs[i] !== b.uvs[i]) return false;
-  }
-  for (let f = 0; f < a.faces.length; f++) {
-    const fa = a.faces[f];
-    const fb = b.faces[f];
-    if (
-      fa.uv[0] !== fb.uv[0] || fa.uv[1] !== fb.uv[1] || fa.uv[2] !== fb.uv[2] ||
-      fa.v[0] !== fb.v[0] || fa.v[1] !== fb.v[1] || fa.v[2] !== fb.v[2]
-    ) {
-      return false;
-    }
-  }
-  return true;
-}
-
 /**
- * 从历史节点恢复：以该节点为父创建一个 restore 节点（分支）。
- *
- * 注意：恢复节点的 mesh 与目标节点相同（语义就是"回到那个状态"），因此**不能**
- * 走 commitRevision 的 UV 去重——即使内容相同，也要建节点来记录 head 跳转并
- * 在图上形成可追溯的分支点。原分支与所有祖先保持不变、仍可达。
- * 若目标就是当前 head，则无需节点。
+ * 从历史节点恢复：即使 UV 与目标相同也建 restore 节点（记录 head 跳转/分支点）。
  */
 export function restoreRevision(
-  graph: RevisionGraph,
+  graphIn: RevisionGraph,
   targetId: string,
   mesh: MeshData,
   summary: RevisionSummary,
@@ -170,11 +290,25 @@ export function restoreRevision(
   now?: number,
   idFactory?: () => string,
 ): { graph: RevisionGraph; revision: Revision; created: boolean } {
+  const graph = ensureBranches(graphIn);
   const target = graph.revisions[targetId];
   if (!target) throw new Error(`restoreRevision: 版本 ${targetId} 不存在`);
-  if (targetId === graph.headId) {
+  const branchId = graph.currentBranchId;
+  const currentBranch = graph.branches[branchId];
+  if (targetId === currentBranch.headId) {
     return { graph, revision: target, created: false };
   }
+  // 恢复到祖先意味着在该点分叉：保留原分支指针，并自动创建一个新的命名分支，
+  // restore 节点落在新分支上，原 head 仍可达（不被覆盖）。
+  const newBranchId = idFactory ? `branch-${idFactory()}` : crypto.randomUUID();
+  const newBranch: Branch = {
+    id: newBranchId,
+    name: `恢复-v${target.seq}`,
+    headId: '', // 下面用 restore 节点填充
+    forkPointId: targetId,
+    createdAt: now ?? Date.now(),
+    sourceBranchId: branchId,
+  };
   const rev: Revision = {
     id: idFactory ? idFactory() : crypto.randomUUID(),
     parentId: targetId,
@@ -184,62 +318,118 @@ export function restoreRevision(
     seq: graph.nextSeq,
     mesh,
     summary,
+    branchId: newBranchId,
+    secondParentId: null,
   };
+  newBranch.headId = rev.id;
+  const branches = { ...graph.branches, [newBranchId]: newBranch };
   const next: RevisionGraph = {
+    ...graph,
     revisions: { ...graph.revisions, [rev.id]: rev },
     headId: rev.id,
+    currentBranchId: newBranchId,
     nextSeq: graph.nextSeq + 1,
+    branches,
+    etag: graph.etag + 1,
   };
   return { graph: next, revision: rev, created: true };
 }
 
-/** 从某节点回溯到根的祖先链（含自身），seq 升序。 */
-export function ancestorChain(graph: RevisionGraph, id: string): Revision[] {
+export function ancestorChain(graphIn: RevisionGraph, id: string): Revision[] {
+  const graph = ensureBranches(graphIn);
   const chain: Revision[] = [];
   let cur: Revision | undefined = graph.revisions[id];
   const guard = new Set<string>();
   while (cur && !guard.has(cur.id)) {
     guard.add(cur.id);
     chain.push(cur);
+    // 合并节点沿第一父回溯（目标侧）
     cur = cur.parentId ? graph.revisions[cur.parentId] : undefined;
   }
   return chain.reverse();
 }
 
-/** 从 head 不可达的节点（草稿/被放弃的分支），用于 GC。 */
-export function unreachableNodes(graph: RevisionGraph): string[] {
+/** 两个版本的最近共同祖先（沿第一父，考虑合并节点的第二父）。 */
+export function mergeBase(graphIn: RevisionGraph, aId: string, bId: string): Revision | null {
+  const graph = ensureBranches(graphIn);
+  const ancestorsOf = (id: string): Set<string> => {
+    const set = new Set<string>();
+    const stack = [id];
+    while (stack.length) {
+      const x = stack.pop()!;
+      if (set.has(x)) continue;
+      set.add(x);
+      const r = graph.revisions[x];
+      if (!r) continue;
+      if (r.parentId) stack.push(r.parentId);
+      if (r.secondParentId) stack.push(r.secondParentId);
+    }
+    return set;
+  };
+  const ancA = ancestorsOf(aId);
+  const seen = new Set<string>();
+  const stack = [bId];
+  let best: Revision | null = null;
+  while (stack.length) {
+    const x = stack.pop()!;
+    if (seen.has(x)) continue;
+    seen.add(x);
+    if (ancA.has(x)) {
+      const r = graph.revisions[x];
+      if (!best || r.seq > best.seq) best = r;
+    }
+    const r = graph.revisions[x];
+    if (!r) continue;
+    if (r.parentId) stack.push(r.parentId);
+    if (r.secondParentId) stack.push(r.secondParentId);
+  }
+  return best;
+}
+
+export function unreachableNodes(graphIn: RevisionGraph): string[] {
+  const graph = ensureBranches(graphIn);
   const reachable = new Set<string>();
-  // 所有"叶子"其实都应保留为可恢复点；这里"不可达"特指连任何 head/根链都不在、
-  // 且没有子节点引用的孤儿。实际图谱中每个节点都从根可达（只追加），所以正常为空；
-  // 半写入失败可能留下无父引用且非根的节点，这才是清理对象。
-  // 根 = parentId 为 null 的节点集合；从所有根做可达性遍历。
-  const roots = Object.values(graph.revisions).filter((r) => r.parentId === null);
-  const stack = roots.map((r) => r.id);
+  // 所有分支头 + 合并草稿引用都作为种子（草稿引用的版本必须保留）
+  const roots = new Set<string>();
+  for (const b of Object.values(graph.branches)) roots.add(b.headId);
+  if (graph.pendingMerge) {
+    roots.add(graph.pendingMerge.baseId);
+    roots.add(graph.pendingMerge.proposalId);
+    roots.add(graph.pendingMerge.targetId);
+  }
+  // 子邻接（父 id -> 子节点），用于从祖先向下展开
+  const children = new Map<string, string[]>();
+  for (const r of Object.values(graph.revisions)) {
+    for (const pid of [r.parentId, r.secondParentId].filter((x): x is string => !!x)) {
+      const arr = children.get(pid) ?? [];
+      arr.push(r.id);
+      children.set(pid, arr);
+    }
+  }
+  const stack = [...roots];
   while (stack.length) {
     const id = stack.pop()!;
     if (reachable.has(id)) continue;
     reachable.add(id);
-    for (const r of Object.values(graph.revisions)) {
-      if (r.parentId === id) stack.push(r.id);
-    }
+    // 向祖先（历史）与后代（分支）两个方向展开
+    const r = graph.revisions[id];
+    if (r?.parentId) stack.push(r.parentId);
+    if (r?.secondParentId) stack.push(r.secondParentId);
+    for (const child of children.get(id) ?? []) stack.push(child);
   }
   return Object.keys(graph.revisions).filter((id) => !reachable.has(id));
 }
 
-/**
- * 删除一个不可达（孤儿草稿）节点。只允许删除 unreachableNodes 集合中的节点；
- * 拒绝删除任何仍可达的版本，避免破坏历史。
- */
-export function deleteUnreachable(graph: RevisionGraph, id: string): RevisionGraph {
+export function deleteUnreachable(graphIn: RevisionGraph, id: string): RevisionGraph {
+  const graph = ensureBranches(graphIn);
   if (!unreachableNodes(graph).includes(id)) {
     throw new Error(`deleteUnreachable: 版本 ${id} 仍可达，拒绝删除`);
   }
   const revisions = { ...graph.revisions };
   delete revisions[id];
-  return { ...graph, revisions };
+  return { ...graph, revisions, etag: graph.etag + 1 };
 }
 
-/** 计算两个版本的差异。 */
 export function diffRevisions(
   before: Revision,
   after: Revision,

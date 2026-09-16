@@ -21,6 +21,25 @@ import {
 } from '../model/revisions';
 import * as storage from '../io/storage';
 import { mirrorIslandsU } from '../model/uvedit';
+import {
+  allResolved,
+  buildMergedMesh,
+  checkoutBranch,
+  commitMerge,
+  commitOnBranch,
+  computeMergeDraft,
+  createProposal,
+  resolveConflict as resolveDraftConflict,
+  setPendingMerge,
+} from '../model/branches';
+import {
+  ensureBranches,
+  MAIN_BRANCH,
+  type Branch,
+  type MergeConflict,
+  type MergeDraft,
+  type ResolutionKind,
+} from '../model/revisions';
 
 export interface AppState {
   graph: RevisionGraph | null;
@@ -122,21 +141,44 @@ function scheduleSave(): void {
   }, 400);
 }
 
-/** 立即持久化当前图谱。返回是否成功。乱序调用以最新一次为准。 */
+/**
+ * 立即持久化当前图谱。返回是否成功。乱序调用以最新一次为准。
+ *
+ * 乐观并发：以当前 etag 做 CAS；若另一标签页已推进远端，则把远端新增的不可变
+ * 节点/分支并入内存图（mergeGraphs，不可变节点不会冲突），再以新 etag 重试，
+ * 保证两个标签页的可达分支都不被覆盖。
+ */
 export async function persistNow(): Promise<boolean> {
   if (!state.graph || !state.headId) return true;
   const mySeq = ++saveSeq;
   setState({ saveState: 'saving' });
-  const graph = state.graph;
-  const projectId = state.projectId;
-  const name = state.projectName;
+  let projectId = state.projectId;
+  let name = state.projectName;
+  let graph = state.graph;
+  let expectedEtag = graph.etag ?? 0;
   try {
-    await storage.saveProjectGraph(projectId, name, graph);
-    storage.rememberLastProjectId(projectId);
-    // 乱序完成的旧保存不覆盖更新的状态
-    if (mySeq !== saveSeq) return true;
-    setState({ dirty: false, saveState: 'idle', lastSavedAt: Date.now() });
-    return true;
+    // 最多 3 次 CAS 重试（双标签页交错）
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await storage.saveProjectGraphIfEtag(projectId, name, graph, expectedEtag);
+        storage.rememberLastProjectId(projectId);
+        if (mySeq !== saveSeq) return true;
+        // 用合并后的图更新内存（若中途合并过），但不改变 head
+        setState({ graph, dirty: false, saveState: 'idle', lastSavedAt: Date.now() });
+        return true;
+      } catch (e) {
+        if (e instanceof storage.ConcurrentWriteError) {
+          // 合并远端不可变节点，保留本地产物
+          const merged = storage.mergeGraphs(graph, e.remote.graph);
+          graph = merged;
+          expectedEtag = e.remote.graph.etag ?? 0;
+          setState({ graph: merged });
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw new Error('并发写入重试次数耗尽');
   } catch (e) {
     if (mySeq === saveSeq) {
       // 已提交的版本全部保留在内存中；下次保存整图重放，不丢失任何版本
@@ -152,11 +194,12 @@ export async function persistNow(): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 function adoptGraph(
-  graph: RevisionGraph,
+  graphIn: RevisionGraph,
   projectId: string,
   projectName: string,
   opts: { dirty: boolean; savedAt: number | null },
 ): void {
+  const graph = ensureBranches(graphIn);
   const head = graph.revisions[graph.headId];
   const analysis = analysisFor(head);
   analysisCache.clear();
@@ -171,7 +214,7 @@ function adoptGraph(
     projectId,
     projectName,
     dirty: opts.dirty,
-    saveState: opts.dirty ? 'idle' : 'idle',
+    saveState: 'idle',
     lastSavedAt: opts.savedAt,
   });
 }
@@ -226,6 +269,7 @@ function commitEdit(
     label,
     mesh: next,
     summary,
+    branchId: graph.currentBranchId,
   });
   if (!created) return null;
   analysisCache.set(revision.id, analysis);
@@ -361,6 +405,180 @@ export function getHistory(): {
     ancestors: ancestorChain(state.graph, state.graph.headId),
     unreachable: unreachableNodes(state.graph),
   };
+}
+
+// ---------------------------------------------------------------------------
+// 提案分支与三方合并
+// ---------------------------------------------------------------------------
+
+/** 从当前 head（或指定版本）创建提案分支，并 checkout 过去以便编辑。 */
+export function startProposal(name: string, forkRevisionId?: string): Branch | null {
+  if (!state.graph || state.previewId) return null;
+  const { graph, branch } = createProposal(state.graph, {
+    name,
+    forkRevisionId: forkRevisionId ?? state.headId ?? undefined,
+  });
+  const g2 = checkoutBranch(graph, branch.id);
+  const head = g2.revisions[g2.headId];
+  setState({
+    graph: g2,
+    headId: g2.headId,
+    mesh: head.mesh,
+    analysis: analysisFor(head),
+    selection: new Set(),
+    dirty: true,
+  });
+  scheduleSave();
+  return branch;
+}
+
+export function listBranches(): Branch[] {
+  if (!state.graph) return [];
+  return Object.values(state.graph.branches).sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
+ * 把一个已算好的网格直接提交到指定分支（不改变当前 checkout）。
+ * 供测试/脚本化操作使用；同样走去重，无实际 UV 变化时不建节点。
+ * 返回是否产生了新提交。
+ */
+export function commitMeshToBranch(
+  branchId: string,
+  kind: RevisionKind,
+  label: string,
+  mesh: MeshData,
+): boolean {
+  if (!state.graph) return false;
+  const graph = ensureBranches(state.graph);
+  const branch = graph.branches[branchId];
+  if (!branch) return false;
+  const prepared = ensurePerCornerUVs(mesh);
+  const analysis = analyzeMesh(prepared);
+  const { graph: g2, created } = commitOnBranch(
+    graph,
+    branchId,
+    kind,
+    label,
+    prepared,
+    makeSummary(prepared, analysis),
+  );
+  if (!created) return false;
+  analysisCache.set(g2.branches[branchId].headId, analysis);
+  const onCurrent = state.graph.currentBranchId === branchId;
+  const head = g2.revisions[g2.headId];
+  setState({
+    graph: g2,
+    headId: g2.headId,
+    mesh: onCurrent ? head.mesh : state.mesh,
+    analysis: onCurrent ? analysisFor(head) : state.analysis,
+    dirty: true,
+  });
+  scheduleSave();
+  return true;
+}
+
+export function switchBranch(branchId: string): void {
+  if (!state.graph) return;
+  const g = checkoutBranch(state.graph, branchId);
+  const head = g.revisions[g.headId];
+  setState({
+    graph: g,
+    headId: g.headId,
+    previewId: null,
+    mesh: head.mesh,
+    analysis: analysisFor(head),
+    selection: new Set(),
+  });
+}
+
+/** 开始一次三方合并：计算草稿（自动集 + 冲突），存入 graph.pendingMerge（刷新可续）。 */
+export function beginMerge(proposalBranchId: string, targetBranchId = MAIN_BRANCH): MergeDraft | null {
+  if (!state.graph) return null;
+  const graph = ensureBranches(state.graph);
+  const propHead = graph.branches[proposalBranchId]?.headId;
+  const tgtHead = graph.branches[targetBranchId]?.headId;
+  if (!propHead || !tgtHead) return null;
+  const draft = computeMergeDraft(graph, propHead, tgtHead);
+  const g2 = setPendingMerge(graph, draft);
+  setState({ graph: g2, dirty: true });
+  scheduleSave();
+  return draft;
+}
+
+export function getPendingMerge(): MergeDraft | null {
+  return state.graph?.pendingMerge ?? null;
+}
+
+export function resolveMergeConflict(
+  conflictId: string,
+  resolution: ResolutionKind,
+  manual?: Array<[number, number]>,
+): void {
+  if (!state.graph?.pendingMerge) return;
+  const draft = resolveDraftConflict(state.graph.pendingMerge, conflictId, resolution, manual);
+  const g2 = setPendingMerge(state.graph, draft);
+  // 预览决议后的合并结果（不移动 head）
+  const mesh = buildMergedMesh(g2, draft);
+  const analysis = analyzeMesh(mesh);
+  analysisCache.set(`preview-merge:${conflictId}:${resolution}`, analysis);
+  setState({ graph: g2, dirty: true });
+  scheduleSave();
+}
+
+/** 丢弃未完成的合并草稿。 */
+export function discardMerge(): void {
+  if (!state.graph || !state.graph.pendingMerge) return;
+  const g2 = setPendingMerge(state.graph, null);
+  const head = g2.revisions[g2.headId];
+  setState({
+    graph: g2,
+    mesh: head.mesh,
+    analysis: analysisFor(head),
+    previewId: null,
+    dirty: true,
+  });
+  scheduleSave();
+}
+
+/**
+ * 发布合并（不可逆前由 UI 二次确认）。所有冲突必须已决议。
+ * 原子地产生双亲合并提交、切到目标分支 head、清草稿。
+ */
+export function publishMerge(): { ok: boolean; error?: string } {
+  if (!state.graph || !state.graph.pendingMerge) return { ok: false, error: '没有进行中的合并' };
+  const draft = state.graph.pendingMerge;
+  if (!allResolved(draft)) {
+    return { ok: false, error: `仍有 ${draft.conflicts.filter((c) => c.resolution === null).length} 个冲突未决议` };
+  }
+  const graph = ensureBranches(state.graph);
+  const merged = buildMergedMesh(graph, draft);
+  const analysis = analyzeMesh(merged);
+  const summary = makeSummary(merged, analysis);
+  const { graph: g2, revision } = commitMerge(graph, draft, merged, summary);
+  // 发布后 checkout 到目标分支（合并落地处）
+  const g3 = checkoutBranch(g2, draft.targetBranchId);
+  analysisCache.set(revision.id, analysis);
+  setState({
+    graph: g3,
+    headId: g3.headId,
+    previewId: null,
+    mesh: revision.mesh,
+    analysis,
+    selection: new Set(),
+    dirty: true,
+  });
+  scheduleSave();
+  return { ok: true };
+}
+
+/** 预览当前合并草稿（含部分决议）的结果网格，不移动 head。 */
+export function previewMerge(): MeshData | null {
+  if (!state.graph?.pendingMerge) return null;
+  return buildMergedMesh(state.graph, state.graph.pendingMerge);
+}
+
+export function pendingConflicts(): MergeConflict[] {
+  return state.graph?.pendingMerge?.conflicts ?? [];
 }
 
 // ---------------------------------------------------------------------------

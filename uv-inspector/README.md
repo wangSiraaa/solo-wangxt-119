@@ -22,6 +22,7 @@ npm test           # 分析/身份保留相关的 Node 冒烟测试
 | xatlas WASM 可选自动展开 | `src/xatlas/`，WASM 与 emscripten 工厂随包 vendored，Vite 作为本地静态资源加载 |
 | IndexedDB 存工程，无后端 | `src/io/storage.ts`（整图原子写、v1 自动迁移、本地保存/打开/删除） |
 | 可审计 UV 修订图谱（版本树/分支/预览/对比/恢复） | `src/model/revisions.ts`、`src/components/HistoryPanel.tsx` |
+| 提案分支与三方合并（自动合并/冲突决议/双亲提交） | `src/model/branches.ts`、`src/components/MergeDialog.tsx` |
 | 稳定顶点与面身份的 OBJ 子集 | `src/io/obj.ts`、`src/model/types.ts`（双索引空间，见下） |
 | 接缝两侧可有不同 UV，禁止按空间位置合并顶点 | 解析器与分析器全部基于稳定 id；刻意不做空间焊接（`test/identity.ts` 验证） |
 | 选中面两视图同步 | 选择以稳定面 id 存入 store，两视图订阅同一集合（`src/store/appStore.ts`） |
@@ -115,9 +116,35 @@ xatlas **不按坐标焊接**输入顶点——它依据索引共享关系建立
 
 ### IndexedDB schema 与迁移
 
-v2：`projects` 中每条记录为 `{ id, name, updatedAt, version:2, graph }`，`graph` 即整棵版本树。
+v2：`projects` 中每条记录为 `{ id, name, updatedAt, version:2, graph }`，`graph` 即整棵版本树
+（含命名分支、合并提交、未完成合并草稿、乐观并发 etag）。
 旧版（v1，仅存当前 mesh）在 `onupgradeneeded` 同一事务中读出并迁移为单根版本图谱；
 另有防御性迁移路径兜底。迁移根版本上的镜像岛/负轴翻转判定/xatlas 修正/OBJ 往返结果不变。
+
+## 提案分支与三方合并
+
+模型师可从任意历史版本创建**提案分支**，在其中镜像岛、修正翻转或 xatlas 展开（提交只落在该分支），
+然后把提案相对**共同祖先**的 UV 改动合并回目标分支（默认 main），而不是恢复整份 mesh。
+
+- **三方差异**（`model/branches.ts`）：base = mergeBase(proposal, target)，按稳定 **face id + 角点 UV 身份**
+  比较每个面。仅一方相对 base 改动 → 自动合并；双方都改且结果一致 → 自动取任一；
+  同一面双方给出不同结果（`same-face-changed`），或坐标级编辑共享同一被双方改动的 UV 顶点
+  （`shared-uv-vertex`）→ 冲突。
+- **坐标级 vs 拓扑级**：镜像/修正是坐标级（UV 数组长度与角点 UV id 不变），直接把提案坐标写入相同 id；
+  xatlas 是拓扑级（重建 UV 数组/引用），输出追加为新 UV 顶点再重映射。
+- **冲突决议可审计**：每个冲突保留祖先/提案/目标三方快照与原因，可逐项选「采用提案 / 采用目标 /
+  手动 UV」；决议写入 `MergeDraft`，未全部决议禁止发布。
+- **合并提交是双亲节点**：第一父=目标头、第二父=提案头，附 `MergeCommitInfo`（祖先、双亲、逐冲突决议、
+  自动面/冲突计数）。提案分支标记 merged，但所有节点与分支指针都保留、仍可达。
+- **合并草稿可续可弃**：`graph.pendingMerge` 随图持久化，刷新/写失败后重开工程仍能继续决议或丢弃；
+  草稿引用的版本被视为可达，不会被 GC 误删。
+- **并发安全**：整图单文档 + etag 乐观锁（`saveProjectGraphIfEtag`）。双标签页交错保存时，过期 etag
+  抛 `ConcurrentWriteError` 并回传远端，调用方用 `mergeGraphs` 并入远端的不可变节点/分支后重试，
+  任一可达分支都不被覆盖。
+- **OBJ 导出**严格对应当前 checkout 的 head；合并发布后 head 即双亲合并提交，文件名含 `v<seq>`。
+
+工具栏「提案 / 合并」打开对话框：创建并切换提案分支、选择提案/目标、计算三方差异、逐项决议、
+预览合并摘要、不可逆发布前二次确认。
 
 ## 目录
 
@@ -125,14 +152,16 @@ v2：`projects` 中每条记录为 `{ id, name, updatedAt, version:2, graph }`�
 src/
   analysis/analyze.ts   全部检测（翻转/畸变/边/岛/重叠）
   io/obj.ts             OBJ 子集解析与标准导出
-  io/storage.ts         IndexedDB v2 整图原子写、v1 迁移、最近工程记忆
-  model/revisions.ts    不可变版本树：提交/去重/分支恢复/对比/GC
-  components/HistoryPanel.tsx 版本图谱、预览、A/B 对比、恢复
+  io/storage.ts         IndexedDB v2 整图原子写、etag 乐观并发、v1 迁移
+  model/revisions.ts    不可变版本树+分支：提交/去重/恢复/对比/GC/合并提交
+  model/branches.ts     提案分支与三方合并：差异/冲突/决议/合并网格构建
+  components/HistoryPanel.tsx 版本图谱（按分支）、预览、A/B 对比、恢复
+  components/MergeDialog.tsx  提案创建、三方差异、逐项冲突决议、发布确认
   model/                类型、几何工具、UV 修补/编辑、样例构造器
   samples/samples.ts    四个教学/回归样例
   three/                3D 与 2D 视图
   xatlas/               WASM 加载、Api 封装、网格身份映射
-  store/appStore.ts     useSyncExternalStore 全局状态
+  store/appStore.ts     useSyncExternalStore 全局状态（含提案/合并动作）
 vendor/xatlas/          xatlas 官方 emscripten 构建（JS + WASM，MIT）
-test/                   Node 冒烟测试（tsx）
+test/                   Node 冒烟/单元测试（tsx，含 merge/concurrency/storeMerge）
 ```
